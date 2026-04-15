@@ -9,7 +9,7 @@ authors = [
     {name = "milla-jovovich"},
 ]
 keywords = [
-    "ai", "memory", "llm", "rag", "chromadb", "mcp",
+    "ai", "memory", "llm", "rag", "indentiagraph", "mcp",
     "vector-database", "claude", "chatgpt", "embeddings",
 ]
 classifiers = [
@@ -25,7 +25,9 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "chromadb>=0.5.0",
+    "elasticsearch>=8.0",
+    "sentence-transformers>=2.0",
+    "requests>=2.28",
     "pyyaml>=6.0,<7",
 ]
 

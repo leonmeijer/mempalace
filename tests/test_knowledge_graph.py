@@ -117,12 +117,11 @@ class TestTimeline:
         assert len(tl) == 100  # LIMIT 100 on entity-filtered branch
 
 
-class TestWALMode:
-    def test_wal_mode_enabled(self, kg):
-        conn = kg._conn()
-        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-        conn.close()
-        assert mode == "wal"
+class TestSPARQLConnectivity:
+    def test_sparql_endpoint_reachable(self, kg):
+        """KnowledgeGraph._query() returns a SPARQL results dict with 'results' key."""
+        result = kg._query("SELECT ?s WHERE { OPTIONAL { ?s ?p ?o } } LIMIT 1")
+        assert "results" in result or "boolean" in result
 
 
 class TestStats:

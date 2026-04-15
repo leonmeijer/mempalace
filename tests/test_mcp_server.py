@@ -22,20 +22,21 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
 
 def _get_collection(palace_path, create=False):
-    """Helper to get collection from test palace.
+    """Helper to get/create an IndentiaGraph collection for the test palace.
 
-    Returns (client, collection) so callers can clean up the client
-    when they are done.
+    Returns (backend, collection) — the backend reference is returned so
+    callers can `del _client` for symmetry with the old ChromaDB helper,
+    but there is no connection to close (IndentiaGraph is a persistent
+    server process).
     """
-    import chromadb
+    from mempalace.backends.indentiagraph import IndentiaGraphBackend
 
-    client = chromadb.PersistentClient(path=palace_path)
+    backend = IndentiaGraphBackend()
     if create:
-        return (
-            client,
-            client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"}),
-        )
-    return client, client.get_collection("mempalace_drawers")
+        col = backend.get_or_create_collection(palace_path, "mempalace_drawers")
+    else:
+        col = backend.get_collection(palace_path, "mempalace_drawers")
+    return backend, col
 
 
 # ── Protocol Layer ──────────────────────────────────────────────────────
@@ -709,80 +710,56 @@ class TestDiaryTools:
         assert entry2 in contents
 
 
-# ── Cache Invalidation (inode/mtime) ──────────────────────────────────
+# ── Cache / Reconnect ────────────────────────────────────────────────────
 
 
 class TestCacheInvalidation:
-    """Tests for _get_collection inode/mtime cache invalidation logic."""
+    """Tests for _get_collection caching and the reconnect tool."""
 
-    def test_mtime_change_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When mtime changes, the cached collection should be replaced."""
+    def test_collection_cached_across_calls(self, monkeypatch, config, palace_path, kg):
+        """Second call to _get_collection returns the same object (cache hit)."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server
 
-        # Create a real collection so _get_collection succeeds
         _client, _col = _get_collection(palace_path, create=True)
         del _client
 
-        # Prime the cache
         col1 = mcp_server._get_collection()
-        assert col1 is not None
-
-        # Simulate an external write changing the mtime
-        old_mtime = mcp_server._palace_db_mtime
-        monkeypatch.setattr(mcp_server, "_palace_db_mtime", old_mtime - 10.0)
-
-        # _get_collection should detect the mtime drift and reconnect
         col2 = mcp_server._get_collection()
-        assert col2 is not None
+        assert col1 is not None
+        assert col2 is col1  # same cached object
 
-    def test_inode_change_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When inode changes (file replaced), the cached collection should be replaced."""
+    def test_create_true_refreshes_cache(self, monkeypatch, config, palace_path, kg):
+        """Calling _get_collection(create=True) forces a new collection object."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server
 
         _client, _col = _get_collection(palace_path, create=True)
         del _client
 
-        # Prime the cache
         col1 = mcp_server._get_collection()
         assert col1 is not None
 
-        # Simulate a rebuild that changes the inode
-        monkeypatch.setattr(mcp_server, "_palace_db_inode", 99999)
-
-        col2 = mcp_server._get_collection()
+        # create=True should fetch a fresh object
+        col2 = mcp_server._get_collection(create=True)
         assert col2 is not None
+        # After refresh, subsequent calls return the refreshed object
+        col3 = mcp_server._get_collection()
+        assert col3 is col2
 
-    @pytest.mark.skipif(
-        sys.platform == "win32",
-        reason="Windows holds chroma.sqlite3 open while the client is cached, blocking os.remove",
-    )
-    def test_missing_db_invalidates_cache(self, monkeypatch, config, palace_path, kg):
-        """When chroma.sqlite3 disappears, a cached collection should be invalidated."""
+    def test_missing_palace_returns_none(self, monkeypatch, config, kg):
+        """_get_collection returns None when the palace index does not exist."""
         _patch_mcp_server(monkeypatch, config, kg)
-        import os
         from mempalace import mcp_server
 
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        # Simulate a backend that raises FileNotFoundError (no ES index)
+        def _no_index(*args, **kwargs):
+            raise FileNotFoundError("index not found")
 
-        # Prime the cache
-        col1 = mcp_server._get_collection()
-        assert col1 is not None
-        assert mcp_server._collection_cache is not None
+        monkeypatch.setattr(mcp_server._backend, "get_collection", _no_index)
 
-        # Delete the DB file to simulate a rebuild in progress
-        db_file = os.path.join(palace_path, "chroma.sqlite3")
-        if os.path.isfile(db_file):
-            os.remove(db_file)
-
-        # Cache should be invalidated; _get_collection returns None
-        # because the backend can't open a missing DB without create=True
-        mcp_server._get_collection()
-        # The key assertion: the old cached collection was dropped
-        assert mcp_server._palace_db_inode == 0
-        assert mcp_server._palace_db_mtime == 0.0
+        result = mcp_server._get_collection()
+        assert result is None
 
     def test_reconnect_reports_failure_when_no_palace(self, monkeypatch, config, kg):
         """tool_reconnect should report failure when no collection is available."""

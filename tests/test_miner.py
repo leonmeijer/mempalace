@@ -2,12 +2,93 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
-import chromadb
 import yaml
 
 from mempalace.miner import load_config, mine, scan_project, status
 from mempalace.palace import NORMALIZE_VERSION, file_already_mined
+
+
+class _FakeCollection:
+    """In-memory collection that implements the MemPalace collection interface.
+
+    Used in place of a real backend so tests don't require a running server.
+    """
+
+    def __init__(self):
+        self._docs: dict = {}  # id -> {content, **meta}
+
+    def _matches(self, doc: dict, where: dict) -> bool:
+        if "$and" in where:
+            return all(self._matches(doc, c) for c in where["$and"])
+        if "$or" in where:
+            return any(self._matches(doc, c) for c in where["$or"])
+        return all(doc.get(k) == v for k, v in where.items())
+
+    def add(self, *, documents, ids, metadatas=None):
+        self.upsert(documents=documents, ids=ids, metadatas=metadatas)
+
+    def upsert(self, *, documents, ids, metadatas=None):
+        metas = metadatas or [{}] * len(documents)
+        for doc, doc_id, meta in zip(documents, ids, metas):
+            self._docs[doc_id] = {"content": doc, **meta}
+
+    def update(self, *, ids, documents=None, metadatas=None):
+        for i, doc_id in enumerate(ids):
+            if doc_id not in self._docs:
+                raise ValueError(f"ID not found: {doc_id}")
+            if documents is not None:
+                self._docs[doc_id]["content"] = documents[i]
+            if metadatas is not None:
+                self._docs[doc_id].update(metadatas[i])
+
+    def get(self, **kwargs):
+        where = kwargs.get("where")
+        limit = kwargs.get("limit", 10000)
+        offset = kwargs.get("offset", 0)
+        ids_filter = kwargs.get("ids")
+
+        items = list(self._docs.items())
+        if ids_filter:
+            items = [(k, v) for k, v in items if k in ids_filter]
+        if where:
+            items = [(k, v) for k, v in items if self._matches(v, where)]
+        items = items[offset : offset + limit]
+
+        result_ids = [k for k, _ in items]
+        result_docs = [v["content"] for _, v in items]
+        result_metas = [
+            {fk: fv for fk, fv in v.items() if fk != "content"} for _, v in items
+        ]
+        return {"ids": result_ids, "documents": result_docs, "metadatas": result_metas}
+
+    def query(self, **kwargs):
+        n = kwargs.get("n_results", 5)
+        items = list(self._docs.items())[:n]
+        ids_row = [k for k, _ in items]
+        docs_row = [v["content"] for _, v in items]
+        metas_row = [{fk: fv for fk, fv in v.items() if fk != "content"} for _, v in items]
+        return {
+            "ids": [ids_row],
+            "documents": [docs_row],
+            "metadatas": [metas_row],
+            "distances": [[0.1] * len(items)],
+        }
+
+    def delete(self, **kwargs):
+        ids = kwargs.get("ids")
+        where = kwargs.get("where")
+        if ids:
+            for id_ in ids:
+                self._docs.pop(id_, None)
+        elif where:
+            to_del = [k for k, v in self._docs.items() if self._matches(v, where)]
+            for k in to_del:
+                del self._docs[k]
+
+    def count(self):
+        return len(self._docs)
 
 
 def write_file(path: Path, content: str):
@@ -43,11 +124,14 @@ def test_project_mining():
             )
 
         palace_path = project_root / "palace"
-        mine(str(project_root), str(palace_path))
+        fake_col = _FakeCollection()
+        with (
+            patch("mempalace.miner.get_collection", return_value=fake_col),
+            patch("mempalace.miner.get_closets_collection", return_value=fake_col),
+        ):
+            mine(str(project_root), str(palace_path))
 
-        client = chromadb.PersistentClient(path=str(palace_path))
-        col = client.get_collection("mempalace_drawers")
-        assert col.count() > 0
+        assert fake_col.count() > 0
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -227,12 +311,7 @@ def test_scan_project_skip_dirs_still_apply_without_override():
 def test_file_already_mined_check_mtime():
     tmpdir = tempfile.mkdtemp()
     try:
-        palace_path = os.path.join(tmpdir, "palace")
-        os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection(
-            "mempalace_drawers", metadata={"hnsw:space": "cosine"}
-        )
+        col = _FakeCollection()
 
         test_file = os.path.join(tmpdir, "test.txt")
         with open(test_file, "w") as f:
@@ -285,8 +364,6 @@ def test_file_already_mined_check_mtime():
         )
         assert file_already_mined(col, "/fake/no_mtime.txt", check_mtime=True) is False
     finally:
-        # Release ChromaDB file handles before cleanup (required on Windows)
-        del col, client
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -335,67 +412,53 @@ def test_status_missing_palace_does_not_create_empty_collection(tmp_path, capsys
 
 def test_file_already_mined_returns_false_for_stale_normalize_version():
     """Pre-v2 drawers (no field, or older integer) must not short-circuit."""
-    tmpdir = tempfile.mkdtemp()
-    try:
-        palace_path = os.path.join(tmpdir, "palace")
-        os.makedirs(palace_path)
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+    col = _FakeCollection()
 
-        # Pre-v2 drawer: no normalize_version field at all
-        col.add(
-            ids=["d_old"],
-            documents=["old"],
-            metadatas=[{"source_file": "/fake/old.jsonl"}],
-        )
-        assert file_already_mined(col, "/fake/old.jsonl") is False
+    # Pre-v2 drawer: no normalize_version field at all
+    col.add(
+        ids=["d_old"],
+        documents=["old"],
+        metadatas=[{"source_file": "/fake/old.jsonl"}],
+    )
+    assert file_already_mined(col, "/fake/old.jsonl") is False
 
-        # Explicitly older version
-        col.add(
-            ids=["d_v1"],
-            documents=["v1"],
-            metadatas=[{"source_file": "/fake/v1.jsonl", "normalize_version": 1}],
-        )
-        assert file_already_mined(col, "/fake/v1.jsonl") is False
+    # Explicitly older version
+    col.add(
+        ids=["d_v1"],
+        documents=["v1"],
+        metadatas=[{"source_file": "/fake/v1.jsonl", "normalize_version": 1}],
+    )
+    assert file_already_mined(col, "/fake/v1.jsonl") is False
 
-        # Current version — short-circuits
-        col.add(
-            ids=["d_current"],
-            documents=["cur"],
-            metadatas=[
-                {
-                    "source_file": "/fake/current.jsonl",
-                    "normalize_version": NORMALIZE_VERSION,
-                }
-            ],
-        )
-        assert file_already_mined(col, "/fake/current.jsonl") is True
-    finally:
-        del col, client
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    # Current version — short-circuits
+    col.add(
+        ids=["d_current"],
+        documents=["cur"],
+        metadatas=[
+            {
+                "source_file": "/fake/current.jsonl",
+                "normalize_version": NORMALIZE_VERSION,
+            }
+        ],
+    )
+    assert file_already_mined(col, "/fake/current.jsonl") is True
 
 
 def test_add_drawer_stamps_normalize_version(tmp_path):
     """Fresh drawers carry the current schema version so future upgrades work."""
     from mempalace.miner import add_drawer
 
-    palace_path = tmp_path / "palace"
-    palace_path.mkdir()
-    client = chromadb.PersistentClient(path=str(palace_path))
-    col = client.get_or_create_collection("mempalace_drawers")
-    try:
-        added = add_drawer(
-            collection=col,
-            wing="test",
-            room="notes",
-            content="hello",
-            source_file=str(tmp_path / "src.md"),
-            chunk_index=0,
-            agent="unit",
-        )
-        assert added is True
-        stored = col.get(limit=1)
-        meta = stored["metadatas"][0]
-        assert meta["normalize_version"] == NORMALIZE_VERSION
-    finally:
-        del col, client
+    col = _FakeCollection()
+    added = add_drawer(
+        collection=col,
+        wing="test",
+        room="notes",
+        content="hello",
+        source_file=str(tmp_path / "src.md"),
+        chunk_index=0,
+        agent="unit",
+    )
+    assert added is True
+    stored = col.get(limit=1)
+    meta = stored["metadatas"][0]
+    assert meta["normalize_version"] == NORMALIZE_VERSION

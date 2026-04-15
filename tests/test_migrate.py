@@ -1,12 +1,10 @@
-"""Tests for destructive-operation safety in mempalace.migrate."""
+"""Tests for mempalace.migrate — stub that replaced the ChromaDB migration tool."""
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-from mempalace.migrate import migrate
+from mempalace.migrate import contains_palace_database, migrate
 
 
-def test_migrate_requires_palace_database(tmp_path, capsys):
+def test_migrate_always_prints_indentiagraph_message(capsys, tmp_path):
+    """migrate() should always print that IndentiaGraph is now the backend."""
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
 
@@ -14,35 +12,27 @@ def test_migrate_requires_palace_database(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert result is False
-    assert "No palace database found" in out
+    assert "IndentiaGraph" in out
 
 
-def test_migrate_aborts_without_confirmation(tmp_path, capsys):
+def test_migrate_returns_false_regardless_of_args(tmp_path):
+    """migrate() always returns False — no actual migration is performed."""
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    # Presence of chroma.sqlite3 is the safety gate; validity is mocked below.
-    (palace_dir / "chroma.sqlite3").write_text("db")
 
-    mock_chromadb = SimpleNamespace(
-        __version__="0.6.0",
-        PersistentClient=MagicMock(side_effect=Exception("unreadable")),
-    )
+    assert migrate(str(palace_dir)) is False
+    assert migrate(str(palace_dir), dry_run=True) is False
+    assert migrate(str(palace_dir), confirm=True) is False
+    assert migrate("/nonexistent/path") is False
 
-    with (
-        patch.dict("sys.modules", {"chromadb": mock_chromadb}),
-        patch("mempalace.migrate.detect_chromadb_version", return_value="0.5.x"),
-        patch(
-            "mempalace.migrate.extract_drawers_from_sqlite",
-            return_value=[{"id": "id1", "document": "doc", "metadata": {"wing": "w", "room": "r"}}],
-        ),
-        patch("builtins.input", return_value="n"),
-        patch("mempalace.migrate.shutil.copytree") as mock_copytree,
-        patch("mempalace.migrate.shutil.rmtree") as mock_rmtree,
-    ):
-        result = migrate(str(palace_dir))
 
-    out = capsys.readouterr().out
-    assert result is False
-    assert "Aborted." in out
-    mock_copytree.assert_not_called()
-    mock_rmtree.assert_not_called()
+def test_contains_palace_database_true_for_existing_dir(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    assert contains_palace_database(str(palace_dir)) is True
+
+
+def test_contains_palace_database_false_for_missing_dir(tmp_path):
+    missing = tmp_path / "no-such-palace"
+    assert contains_palace_database(str(missing)) is False

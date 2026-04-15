@@ -85,6 +85,10 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
 DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 
+# IndentiaGraph endpoints (overridable via environment variables)
+INDENTIAGRAPH_ES_URL = os.getenv("INDENTIAGRAPH_ES_URL", "http://localhost:9200")
+INDENTIAGRAPH_SPARQL_URL = os.getenv("INDENTIAGRAPH_SPARQL_URL", "http://localhost:7001")
+
 DEFAULT_TOPIC_WINGS = [
     "emotions",
     "consciousness",
@@ -173,8 +177,24 @@ class MempalaceConfig:
 
     @property
     def collection_name(self):
-        """ChromaDB collection name."""
+        """Storage collection name."""
         return self._file_config.get("collection_name", DEFAULT_COLLECTION_NAME)
+
+    @property
+    def indentiagraph_es_url(self):
+        """IndentiaGraph Elasticsearch-compatible API URL (port 9200)."""
+        return os.getenv(
+            "INDENTIAGRAPH_ES_URL",
+            self._file_config.get("indentiagraph_es_url", INDENTIAGRAPH_ES_URL),
+        )
+
+    @property
+    def indentiagraph_sparql_url(self):
+        """IndentiaGraph SPARQL API URL (port 7001)."""
+        return os.getenv(
+            "INDENTIAGRAPH_SPARQL_URL",
+            self._file_config.get("indentiagraph_sparql_url", INDENTIAGRAPH_SPARQL_URL),
+        )
 
     @property
     def people_map(self):

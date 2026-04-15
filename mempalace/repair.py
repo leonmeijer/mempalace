@@ -1,20 +1,13 @@
 """
-repair.py — Scan, prune corrupt entries, and rebuild HNSW index
-================================================================
-
-When ChromaDB's HNSW index accumulates duplicate entries (from repeated
-add() calls with the same ID), link_lists.bin can grow unbounded —
-terabytes on large palaces — eventually causing segfaults.
+repair.py — Scan, prune corrupt entries, and rebuild palace index
+=================================================================
 
 This module provides three operations:
 
   scan    — find every corrupt/unfetchable ID in the palace
   prune   — delete only the corrupt IDs (surgical)
-  rebuild — extract all drawers, delete the collection, recreate with
-            correct HNSW settings, and upsert everything back
-
-The rebuild backs up ONLY chroma.sqlite3 (the source of truth), not the
-full palace directory — so it works even when link_lists.bin is bloated.
+  rebuild — extract all drawers, delete the collection, recreate it,
+            and upsert everything back
 
 Usage (standalone):
     python -m mempalace.repair scan [--wing X]
@@ -32,7 +25,7 @@ import os
 import shutil
 import time
 
-from .backends.chroma import ChromaBackend
+from .backends.indentiagraph import IndentiaGraphBackend
 
 
 COLLECTION_NAME = "mempalace_drawers"
@@ -90,7 +83,7 @@ def scan_palace(palace_path=None, only_wing=None):
     print(f"\n  Palace: {palace_path}")
     print("  Loading...")
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = IndentiaGraphBackend().get_collection(palace_path, COLLECTION_NAME)
 
     where = {"wing": only_wing} if only_wing else None
     total = col.count()
@@ -173,7 +166,7 @@ def prune_corrupt(palace_path=None, confirm=False):
         print("  Re-run with --confirm to actually delete.")
         return
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = IndentiaGraphBackend().get_collection(palace_path, COLLECTION_NAME)
     before = col.count()
     print(f"  Collection size before: {before:,}")
 
@@ -202,12 +195,11 @@ def prune_corrupt(palace_path=None, confirm=False):
 
 
 def rebuild_index(palace_path=None):
-    """Rebuild the HNSW index from scratch.
+    """Rebuild the palace index from scratch.
 
-    1. Extract all drawers via ChromaDB get()
-    2. Back up ONLY chroma.sqlite3 (not the bloated HNSW files)
-    3. Delete and recreate the collection with hnsw:space=cosine
-    4. Upsert all drawers back
+    1. Extract all drawers via get()
+    2. Delete and recreate the collection
+    3. Upsert all drawers back
     """
     palace_path = palace_path or _get_palace_path()
 
@@ -220,7 +212,7 @@ def rebuild_index(palace_path=None):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    backend = ChromaBackend()
+    backend = IndentiaGraphBackend()
     try:
         col = backend.get_collection(palace_path, COLLECTION_NAME)
         total = col.count()
@@ -252,16 +244,8 @@ def rebuild_index(palace_path=None):
         offset += len(batch["ids"])
     print(f"  Extracted {len(all_ids)} drawers")
 
-    # Back up ONLY the SQLite database, not the bloated HNSW files
-    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
-    if os.path.exists(sqlite_path):
-        backup_path = sqlite_path + ".backup"
-        print(f"  Backing up chroma.sqlite3 ({os.path.getsize(sqlite_path) / 1e6:.0f} MB)...")
-        shutil.copy2(sqlite_path, backup_path)
-        print(f"  Backup: {backup_path}")
-
-    # Rebuild with correct HNSW settings
-    print("  Rebuilding collection with hnsw:space=cosine...")
+    # Rebuild collection
+    print("  Rebuilding collection...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
     new_col = backend.create_collection(palace_path, COLLECTION_NAME)
 

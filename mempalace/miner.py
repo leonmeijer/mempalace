@@ -614,10 +614,8 @@ def process_file(
             return 0, room
 
         # Purge stale drawers for this file before re-inserting the fresh chunks.
-        # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
-        # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
-        # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
-        # path entirely.
+        # Converts modified-file re-mines from upsert-over-existing-IDs into a
+        # clean delete+insert.
         try:
             collection.delete(where={"source_file": source_file})
         except Exception:

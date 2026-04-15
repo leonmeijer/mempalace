@@ -27,7 +27,7 @@ import os
 import time
 from collections import defaultdict
 
-from .backends.chroma import ChromaBackend
+from .backends.indentiagraph import IndentiaGraphBackend
 
 
 COLLECTION_NAME = "mempalace_drawers"
@@ -130,7 +130,7 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
 def show_stats(palace_path=None):
     """Show duplication statistics without making changes."""
     palace_path = palace_path or _get_palace_path()
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = IndentiaGraphBackend().get_collection(palace_path, COLLECTION_NAME)
 
     groups = get_source_groups(col)
 
@@ -162,7 +162,7 @@ def dedup_palace(
     print("  MemPalace Deduplicator")
     print(f"{'=' * 55}")
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = IndentiaGraphBackend().get_collection(palace_path, COLLECTION_NAME)
 
     print(f"  Palace: {palace_path}")
     print(f"  Drawers: {col.count():,}")

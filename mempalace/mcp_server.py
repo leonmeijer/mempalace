@@ -26,19 +26,17 @@ import sys
 # --- MCP stdio protection (issue #225) -----------------------------------
 # The MCP protocol multiplexes JSON-RPC over stdio: stdout MUST carry only
 # valid JSON-RPC messages, stderr is for human-readable logs. Some
-# transitive dependencies (chromadb → onnxruntime, posthog telemetry) print
-# banners and error messages directly to stdout — sometimes at C level —
-# which breaks Claude Desktop's JSON parser. Redirect stdout → stderr at
-# both the Python and file-descriptor level before heavy imports, then
-# restore the real stdout in main() before entering the protocol loop.
+# transitive dependencies print banners and error messages directly to stdout
+# — sometimes at C level — which breaks Claude Desktop's JSON parser.
+# Redirect stdout → stderr at both the Python and file-descriptor level
+# before heavy imports, then restore the real stdout in main().
 _REAL_STDOUT = sys.stdout
 _REAL_STDOUT_FD = None
 try:
     _REAL_STDOUT_FD = os.dup(1)
     os.dup2(2, 1)
 except (OSError, AttributeError):
-    # Environments without fd-level stdio (embedded interpreters, some test
-    # harnesses). The Python-level redirect below still applies.
+    # Environments without fd-level stdio (embedded interpreters, test harnesses).
     pass
 sys.stdout = sys.stderr
 
@@ -57,7 +55,7 @@ from .config import (  # noqa: E402
     sanitize_content,
 )
 from .version import __version__  # noqa: E402
-from .backends.chroma import ChromaBackend, ChromaCollection  # noqa: E402
+from .backends.indentiagraph import IndentiaGraphBackend  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -95,18 +93,11 @@ if _args.palace:
     os.environ["MEMPALACE_PALACE_PATH"] = os.path.abspath(_args.palace)
 
 _config = MempalaceConfig()
-# Only override KG path when --palace is explicitly provided; otherwise use
-# KnowledgeGraph's default (~/.mempalace/knowledge_graph.sqlite3).
-if _args.palace:
-    _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
-else:
-    _kg = KnowledgeGraph()
+_kg = KnowledgeGraph()
 
 
-_client_cache = None
+_backend = IndentiaGraphBackend()
 _collection_cache = None
-_palace_db_inode = 0  # inode of chroma.sqlite3 at cache time
-_palace_db_mtime = 0.0  # mtime of chroma.sqlite3 at cache time
 
 
 # ==================== WRITE-AHEAD LOG ====================
@@ -159,73 +150,16 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         logger.error(f"WAL write failed: {e}")
 
 
-def _get_client():
-    """Return a ChromaDB PersistentClient, reconnecting if the database changed on disk.
-
-    Detects palace rebuilds (repair/nuke/purge) by checking the inode of
-    chroma.sqlite3.  A full rebuild replaces the file, changing the inode.
-    Also detects external writes (scripts, CLI) via mtime changes — the
-    inode check alone misses in-place modifications that invalidate the
-    in-memory HNSW index.
-
-    Note: FAT/exFAT may return 0 for st_ino — the ``current_inode != 0``
-    guard skips reconnect detection on those filesystems (safe fallback).
-    """
-    global \
-        _client_cache, \
-        _collection_cache, \
-        _palace_db_inode, \
-        _palace_db_mtime, \
-        _metadata_cache, \
-        _metadata_cache_time
-    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
-    try:
-        st = os.stat(db_path)
-        current_inode = st.st_ino
-        current_mtime = st.st_mtime
-    except OSError:
-        current_inode = 0
-        current_mtime = 0.0
-
-    # If the DB file disappeared (e.g. during rebuild) but we have a cached
-    # collection, invalidate so we don't serve stale data.  Without this,
-    # both stored and current values are 0 on the first call after deletion,
-    # making inode_changed and mtime_changed both False.
-    if not os.path.isfile(db_path) and _collection_cache is not None:
-        _client_cache = None
-        _collection_cache = None
-        _palace_db_inode = 0
-        _palace_db_mtime = 0.0
-        # Fall through to normal reconnect which will handle missing DB
-
-    inode_changed = current_inode != 0 and current_inode != _palace_db_inode
-    mtime_changed = current_mtime != 0.0 and abs(current_mtime - _palace_db_mtime) > 0.01
-
-    if _client_cache is None or inode_changed or mtime_changed:
-        _client_cache = ChromaBackend.make_client(_config.palace_path)
-        _collection_cache = None
-        _metadata_cache = None
-        _metadata_cache_time = 0
-        _palace_db_inode = current_inode
-        _palace_db_mtime = current_mtime
-    return _client_cache
-
-
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
+    """Return the IndentiaGraph collection, caching between calls."""
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
-        client = _get_client()
-        if create:
-            _collection_cache = ChromaCollection(
-                client.get_or_create_collection(
-                    _config.collection_name, metadata={"hnsw:space": "cosine"}
-                )
+        if _collection_cache is None or create:
+            _collection_cache = _backend.get_collection(
+                _config.palace_path,
+                collection_name=_config.collection_name,
+                create=create,
             )
-            _metadata_cache = None
-            _metadata_cache_time = 0
-        elif _collection_cache is None:
-            _collection_cache = ChromaCollection(client.get_collection(_config.collection_name))
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
@@ -1113,15 +1047,9 @@ def tool_memories_filed_away():
 
 
 def tool_reconnect():
-    """Force the MCP server to drop the cached ChromaDB collection and reconnect.
-
-    Use after external scripts or CLI commands modify the palace database
-    directly, which can leave the in-memory HNSW index stale.
-    """
-    global _collection_cache, _palace_db_inode, _palace_db_mtime
+    """Force the MCP server to drop the cached collection and reconnect."""
+    global _collection_cache
     _collection_cache = None
-    _palace_db_inode = 0
-    _palace_db_mtime = 0.0
     try:
         col = _get_collection()
         if col is None:

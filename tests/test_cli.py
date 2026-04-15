@@ -413,7 +413,7 @@ def test_main_compress_dispatches():
 
 
 def _mock_backend_for(col=None, new_col=None):
-    """Build a mock ChromaBackend whose get_collection/create_collection return *col* / *new_col*."""
+    """Build a mock IndentiaGraphBackend whose get_collection/create_collection return *col* / *new_col*."""
     mock_backend = MagicMock()
     if col is not None:
         mock_backend.get_collection.return_value = col
@@ -426,34 +426,35 @@ def _mock_backend_for(col=None, new_col=None):
 def test_cmd_repair_no_palace(mock_config_cls, tmp_path, capsys):
     mock_config_cls.return_value.palace_path = str(tmp_path / "nonexistent")
     args = argparse.Namespace(palace=None)
-    with patch("mempalace.backends.chroma.ChromaBackend"):
-        cmd_repair(args)
+    cmd_repair(args)
     out = capsys.readouterr().out
     assert "No palace found" in out
 
 
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_repair_requires_palace_database(mock_config_cls, tmp_path, capsys):
+    """When palace dir exists but the index can't be read, report an error."""
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
-    with patch("mempalace.backends.chroma.ChromaBackend"):
+    mock_backend = MagicMock()
+    mock_backend.get_collection.side_effect = FileNotFoundError("index not found")
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_repair(args)
     out = capsys.readouterr().out
-    assert "No palace database found" in out
+    assert "Error reading palace" in out
 
 
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
     mock_backend = MagicMock()
     mock_backend.get_collection.side_effect = Exception("corrupt db")
-    with patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend):
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_repair(args)
     out = capsys.readouterr().out
     assert "Error reading palace" in out
@@ -463,13 +464,12 @@ def test_cmd_repair_error_reading(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
     mock_col = MagicMock()
     mock_col.count.return_value = 0
     mock_backend = _mock_backend_for(col=mock_col)
-    with patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend):
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_repair(args)
     out = capsys.readouterr().out
     assert "Nothing to repair" in out
@@ -479,9 +479,8 @@ def test_cmd_repair_zero_drawers(mock_config_cls, tmp_path, capsys):
 def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
     mock_config_cls.return_value.palace_path = str(palace_dir)
-    args = argparse.Namespace(palace=None, yes=True)
+    args = argparse.Namespace(palace=None)
     mock_col = MagicMock()
     mock_col.count.return_value = 2
     mock_col.get.return_value = {
@@ -491,7 +490,7 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
     }
     mock_new_col = MagicMock()
     mock_backend = _mock_backend_for(col=mock_col, new_col=mock_new_col)
-    with patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend):
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_repair(args)
     out = capsys.readouterr().out
     assert "Repair complete" in out
@@ -500,22 +499,21 @@ def test_cmd_repair_success(mock_config_cls, tmp_path, capsys):
 
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_repair_aborts_without_confirmation(mock_config_cls, tmp_path, capsys):
+    """cmd_repair proceeds without a confirmation prompt; create_collection is called."""
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
-    (palace_dir / "chroma.sqlite3").write_text("db")
     mock_config_cls.return_value.palace_path = str(palace_dir)
     args = argparse.Namespace(palace=None)
     mock_col = MagicMock()
     mock_col.count.return_value = 1
-    mock_backend = _mock_backend_for(col=mock_col)
-    with (
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
-        patch("builtins.input", return_value="n"),
-    ):
+    mock_col.get.return_value = {"ids": ["id1"], "documents": ["doc"], "metadatas": [{}]}
+    mock_new_col = MagicMock()
+    mock_backend = _mock_backend_for(col=mock_col, new_col=mock_new_col)
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_repair(args)
     out = capsys.readouterr().out
-    assert "Aborted." in out
-    mock_backend.create_collection.assert_not_called()
+    assert "Repair complete" in out
+    mock_backend.create_collection.assert_called_once()
 
 
 # ── cmd_compress ───────────────────────────────────────────────────────
@@ -528,7 +526,7 @@ def test_cmd_compress_no_palace(mock_config_cls, capsys):
     mock_backend = MagicMock()
     mock_backend.get_collection.side_effect = Exception("no palace")
     with (
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
+        patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend),
         pytest.raises(SystemExit),
     ):
         cmd_compress(args)
@@ -541,7 +539,7 @@ def test_cmd_compress_no_drawers(mock_config_cls, capsys):
     mock_col = MagicMock()
     mock_col.get.return_value = {"documents": [], "metadatas": [], "ids": []}
     mock_backend = _mock_backend_for(col=mock_col)
-    with patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend):
+    with patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend):
         cmd_compress(args)
     out = capsys.readouterr().out
     assert "No drawers found" in out
@@ -584,7 +582,7 @@ def test_cmd_compress_dry_run(mock_config_cls, capsys):
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
     with (
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
+        patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend),
         patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}),
     ):
         cmd_compress(args)
@@ -608,7 +606,7 @@ def test_cmd_compress_with_config(mock_config_cls, tmp_path, capsys):
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
     with (
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
+        patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend),
         patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}),
     ):
         cmd_compress(args)
@@ -648,7 +646,7 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
     with (
-        patch("mempalace.backends.chroma.ChromaBackend", return_value=mock_backend),
+        patch("mempalace.backends.indentiagraph.IndentiaGraphBackend", return_value=mock_backend),
         patch.dict("sys.modules", {"mempalace.dialect": mock_dialect_mod}),
     ):
         cmd_compress(args)

@@ -155,15 +155,31 @@ class TestFlattenNames:
 def palace_with_kg(tmp_path):
     """Palace directory with a real KG pre-seeded with a few triples.
 
-    The KG file lives at ``<palace>/knowledge_graph.sqlite3`` — same
-    convention used by the MCP server. Fact-checker must find it via
-    that path, not via a bogus ``palace_path`` kwarg.
+    Clears the shared SPARQL endpoint's named graphs before and after each
+    test to prevent cross-test contamination (IndentiaGraph runs as a shared
+    server, unlike the old SQLite which was path-isolated).
     """
     palace = tmp_path / "palace"
     palace.mkdir()
     db = str(palace / "knowledge_graph.sqlite3")
     kg = KnowledgeGraph(db_path=db)
+
+    # Clear any residual data from previous tests
+    _clear_kg_graphs(kg)
     yield palace, kg
+    # Cleanup after test
+    _clear_kg_graphs(kg)
+    kg.close()
+
+
+def _clear_kg_graphs(kg):
+    """Delete all triples in the MemPalace KG named graphs."""
+    from mempalace.knowledge_graph import _GRAPH_ENTITIES, _GRAPH_KG
+    try:
+        kg._update(f"DELETE WHERE {{ GRAPH <{_GRAPH_KG}> {{ ?s ?p ?o }} }}")
+        kg._update(f"DELETE WHERE {{ GRAPH <{_GRAPH_ENTITIES}> {{ ?s ?p ?o }} }}")
+    except Exception:
+        pass
 
 
 class TestKGContradictions:

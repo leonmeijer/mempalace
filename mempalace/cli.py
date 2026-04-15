@@ -218,21 +218,15 @@ def cmd_status(args):
 
 
 def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
-    import shutil
-    from .backends.chroma import ChromaBackend
-    from .migrate import confirm_destructive_action, contains_palace_database
+    """Rebuild palace index from existing data."""
+    from .backends.indentiagraph import IndentiaGraphBackend
 
     palace_path = os.path.abspath(
         os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     )
-    db_path = os.path.join(palace_path, "chroma.sqlite3")
 
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")
-        return
-    if not contains_palace_database(palace_path):
-        print(f"\n  No palace database found at {db_path}")
         return
 
     print(f"\n{'=' * 55}")
@@ -240,7 +234,7 @@ def cmd_repair(args):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    backend = ChromaBackend()
+    backend = IndentiaGraphBackend()
 
     # Try to read existing drawers
     try:
@@ -254,11 +248,6 @@ def cmd_repair(args):
 
     if total == 0:
         print("  Nothing to repair.")
-        return
-
-    if not confirm_destructive_action(
-        "Repair", palace_path, assume_yes=getattr(args, "yes", False)
-    ):
         return
 
     # Extract all drawers in batches
@@ -276,20 +265,6 @@ def cmd_repair(args):
         offset += batch_size
     print(f"  Extracted {len(all_ids)} drawers")
 
-    # Backup and rebuild
-    palace_path = os.path.normpath(palace_path)
-    backup_path = palace_path + ".backup"
-    if os.path.exists(backup_path):
-        if not contains_palace_database(backup_path):
-            print(
-                "  Backup validation failed: backup path exists but does not contain chroma.sqlite3. "
-                f"Please remove or rename: {backup_path}"
-            )
-            return
-        shutil.rmtree(backup_path)
-    print(f"  Backing up to {backup_path}...")
-    shutil.copytree(palace_path, backup_path)
-
     print("  Rebuilding collection...")
     backend.delete_collection(palace_path, "mempalace_drawers")
     new_col = backend.create_collection(palace_path, "mempalace_drawers")
@@ -299,12 +274,11 @@ def cmd_repair(args):
         batch_ids = all_ids[i : i + batch_size]
         batch_docs = all_docs[i : i + batch_size]
         batch_metas = all_metas[i : i + batch_size]
-        new_col.add(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+        new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
         filed += len(batch_ids)
         print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
-    print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
 
 
@@ -345,7 +319,7 @@ def cmd_mcp(args):
 
 def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
-    from .backends.chroma import ChromaBackend
+    from .backends.indentiagraph import IndentiaGraphBackend
     from .dialect import Dialect
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
@@ -365,7 +339,7 @@ def cmd_compress(args):
         dialect = Dialect()
 
     # Connect to palace
-    backend = ChromaBackend()
+    backend = IndentiaGraphBackend()
     try:
         col = backend.get_collection(palace_path, "mempalace_drawers")
     except Exception:

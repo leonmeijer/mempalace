@@ -10,6 +10,7 @@ mempalace imports — so that module-level initialisations (e.g.
 instead of the real user profile.
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -27,22 +28,30 @@ os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 
 # Now it is safe to import mempalace modules that trigger initialisation.
-import chromadb  # noqa: E402
 import pytest  # noqa: E402
 
+from mempalace.backends.indentiagraph import IndentiaGraphBackend  # noqa: E402
 from mempalace.config import MempalaceConfig  # noqa: E402
-from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+from mempalace.knowledge_graph import KnowledgeGraph, _GRAPH_ENTITIES, _GRAPH_KG  # noqa: E402
+
+
+def _clear_kg_named_graphs(kg: KnowledgeGraph) -> None:
+    """Delete all triples in the MemPalace named graphs on the shared SPARQL endpoint."""
+    try:
+        kg._update(f"DELETE WHERE {{ GRAPH <{_GRAPH_KG}> {{ ?s ?p ?o }} }}")
+        kg._update(f"DELETE WHERE {{ GRAPH <{_GRAPH_ENTITIES}> {{ ?s ?p ?o }} }}")
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset the MCP server's cached collection between tests."""
 
     def _clear_cache():
         try:
             from mempalace import mcp_server
 
-            mcp_server._client_cache = None
             mcp_server._collection_cache = None
         except (ImportError, AttributeError):
             pass
@@ -90,8 +99,6 @@ def config(tmp_dir, palace_path):
     """A MempalaceConfig pointing at the temp palace."""
     cfg_dir = os.path.join(tmp_dir, "config")
     os.makedirs(cfg_dir)
-    import json
-
     with open(os.path.join(cfg_dir, "config.json"), "w") as f:
         json.dump({"palace_path": palace_path}, f)
     return MempalaceConfig(config_dir=cfg_dir)
@@ -99,12 +106,14 @@ def config(tmp_dir, palace_path):
 
 @pytest.fixture
 def collection(palace_path):
-    """A ChromaDB collection pre-seeded in the temp palace."""
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    """An IndentiaGraph collection for the temp palace (isolated by path hash)."""
+    backend = IndentiaGraphBackend()
+    col = backend.get_or_create_collection(palace_path, "mempalace_drawers")
     yield col
-    client.delete_collection("mempalace_drawers")
-    del client
+    try:
+        backend.delete_collection(palace_path, "mempalace_drawers")
+    except Exception:
+        pass
 
 
 @pytest.fixture
@@ -125,7 +134,7 @@ def seeded_collection(collection):
             "The React frontend uses TanStack Query for server state management. "
             "All API calls go through a centralized fetch wrapper.",
             "Sprint planning: migrate auth to passkeys by Q3. "
-            "Evaluate ChromaDB alternatives for vector search.",
+            "Evaluate vector search backends.",
         ],
         metadatas=[
             {
@@ -167,10 +176,16 @@ def seeded_collection(collection):
 
 @pytest.fixture
 def kg(tmp_dir):
-    """An isolated KnowledgeGraph using a temp SQLite file."""
+    """An isolated KnowledgeGraph backed by the shared IndentiaGraph SPARQL endpoint.
+
+    Named graphs are cleared before and after each test to prevent cross-test
+    contamination (the SPARQL endpoint is a shared server, not path-isolated).
+    """
     db_path = os.path.join(tmp_dir, "test_kg.sqlite3")
     graph = KnowledgeGraph(db_path=db_path)
+    _clear_kg_named_graphs(graph)
     yield graph
+    _clear_kg_named_graphs(graph)
     graph.close()
 
 

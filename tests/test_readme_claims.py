@@ -37,7 +37,7 @@ def _readme() -> str:
 def _tools_dict_keys() -> list:
     """Return the list of tool names registered in the TOOLS dict."""
     # Import the module-level TOOLS dict.  We can't just import mcp_server
-    # because it calls chromadb on import, so we parse the source instead.
+    # parse the source instead of importing to avoid side-effects.
     src = _read(MEMPALACE_PKG / "mcp_server.py")
     return re.findall(r'"(mempalace_\w+)":\s*\{', src)
 
@@ -605,23 +605,23 @@ class TestBackendAbstraction:
             "ABC" in src or "abstractmethod" in src
         ), "backends/base.py does not define an abstract base class."
 
-    def test_backends_chroma_exists(self):
-        """Claim: ChromaDB backend implementation.
-        backends/chroma.py must exist and subclass the base."""
-        path = MEMPALACE_PKG / "backends" / "chroma.py"
-        assert path.is_file(), "mempalace/backends/chroma.py does not exist."
+    def test_backends_indentiagraph_exists(self):
+        """Claim: IndentiaGraph backend implementation.
+        backends/indentiagraph.py must exist and subclass the base."""
+        path = MEMPALACE_PKG / "backends" / "indentiagraph.py"
+        assert path.is_file(), "mempalace/backends/indentiagraph.py does not exist."
         src = _read(path)
         assert (
             "BaseCollection" in src or "base" in src
-        ), "backends/chroma.py does not reference the base class."
+        ), "backends/indentiagraph.py does not reference the base class."
 
     def test_backends_importable(self):
-        """Both backend modules should be importable."""
+        """Backend modules should be importable."""
         from mempalace.backends.base import BaseCollection
-        from mempalace.backends.chroma import ChromaBackend
+        from mempalace.backends.indentiagraph import IndentiaGraphBackend
 
         assert BaseCollection is not None
-        assert ChromaBackend is not None
+        assert IndentiaGraphBackend is not None
 
 
 # ---------------------------------------------------------------------------
